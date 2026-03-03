@@ -424,7 +424,7 @@ df = df.sort_values(['pitcher_id', 'game_date']).reset_index(drop=True)
 
 # Columns we don't want to use as features
 exclude_cols = ['strikeouts', 'game_id', 'game_date', 'pitcher_id',
-                'pitcher_name', 'team', 'opponent', 'pitches_thrown', 'innings_pitched']
+                'pitcher_name', 'team', 'opponent']
 
 feature_cols = [col for col in df.columns if col not in exclude_cols]
 info_cols    = ['game_id', 'game_date', 'pitcher_id', 'pitcher_name', 'team', 'opponent']
@@ -448,14 +448,13 @@ for pitcher_id in df['pitcher_id'].unique():
         for col in info_cols:
             row[col] = curr[col]
 
-        # Features from the PREVIOUS game
+        # All features from the PREVIOUS game (including pitches_thrown and innings_pitched)
+        # We won't know these values for the current game at prediction time
         for col in feature_cols:
             row[f'prev_{col}'] = prev[col]
 
-        # Target and game-level info from the CURRENT game
-        row['strikeouts']      = curr['strikeouts']
-        row['pitches_thrown']  = curr['pitches_thrown']
-        row['innings_pitched'] = curr['innings_pitched']
+        # Target from the CURRENT game only
+        row['strikeouts'] = curr['strikeouts']
 
         offset_rows.append(row)
 
