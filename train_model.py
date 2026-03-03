@@ -20,7 +20,7 @@ PATIENCE      = 10
 LEARNING_RATE = 0.001
 BATCH_SIZE    = 32
 TEST_SIZE     = 0.15
-RANDOM_STATE  = 42
+RANDOM_STATE  = 48 # Jacob Degrom's jersey number lol
 
 # =============================================================================
 
