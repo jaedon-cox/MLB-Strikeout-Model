@@ -7,8 +7,8 @@ Pitcher strikeout data collector.
 # PARAMETERS — adjust these before running
 # =============================================================================
 
-START_DATE = '2024-04-01'   # Format: 'YYYY-MM-DD'
-END_DATE   = '2024-10-01'   # Format: 'YYYY-MM-DD'
+START_DATE = '2021-04-01'   # Format: 'YYYY-MM-DD'
+END_DATE   = '2021-05-01'   # Format: 'YYYY-MM-DD'
 
 # =============================================================================
 
