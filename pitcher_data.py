@@ -8,7 +8,7 @@ Pitcher strikeout data collector.
 # =============================================================================
 
 START_DATE = '2021-04-01'   # Format: 'YYYY-MM-DD'
-END_DATE   = '2021-05-01'   # Format: 'YYYY-MM-DD'
+END_DATE   = '2025-10-01'   # Format: 'YYYY-MM-DD'
 
 # =============================================================================
 
@@ -240,11 +240,11 @@ def calculate_rolling_stats(pitcher_history, n_games=5):
         Dict of rolling stats.
     """
     empty = {
-        'rolling_k_pct':     np.nan,
-        'rolling_swstr':     np.nan,
-        'rolling_whiff':     np.nan,
-        'rolling_pitches':   np.nan,
-        'rest_days':         np.nan,
+        'rolling_k_pct':      np.nan,
+        'rolling_swstr':      np.nan,
+        'rolling_whiff':      np.nan,
+        'rolling_pitches':    np.nan,
+        'rolling_strikeouts': np.nan,
     }
 
     if len(pitcher_history) == 0:
@@ -253,24 +253,26 @@ def calculate_rolling_stats(pitcher_history, n_games=5):
     # Use last N games, or all available if fewer than N
     recent = pitcher_history[-n_games:]
 
-    # Rest days = days between the two most recent starts
-    rest_days = np.nan
-    if len(pitcher_history) >= 2:
-        last_start = pitcher_history[-1]['date']
-        prev_start = pitcher_history[-2]['date']
-        rest_days  = (last_start - prev_start).days
-
-    # Pull each metric, skipping NaN values
+    # Pull each metric, skipping None and NaN values
     def avg(key):
-        vals = [g[key] for g in recent if not pd.isna(g.get(key, np.nan))]
+        vals = []
+        for g in recent:
+            val = g.get(key)
+            if val is not None:
+                try:
+                    f = float(val)
+                    if not np.isnan(f):
+                        vals.append(f)
+                except (TypeError, ValueError):
+                    pass
         return round(float(np.mean(vals)), 2) if vals else np.nan
 
     return {
-        'rolling_k_pct':   avg('k_pct'),
-        'rolling_swstr':   avg('swstr_pct'),
-        'rolling_whiff':   avg('whiff_pct'),
-        'rolling_pitches': avg('pitches_thrown'),
-        'rest_days':       rest_days,
+        'rolling_k_pct':      avg('k_pct'),
+        'rolling_swstr':      avg('swstr_pct'),
+        'rolling_whiff':      avg('whiff_pct'),
+        'rolling_pitches':    avg('pitches_thrown'),
+        'rolling_strikeouts': avg('strikeouts'),
     }
 
 
@@ -290,6 +292,9 @@ def update_team_batting(boxscore):
     """
     Pulls batting strikeouts and plate appearances from a boxscore
     and adds them to both teams' running totals.
+
+    Plate appearances are calculated as:
+    AB + BB + HBP + SF + SH (statsapi does not always return plateAppearances directly)
     """
     for side in ['home', 'away']:
         side_data = boxscore.get(side, {})
@@ -297,12 +302,23 @@ def update_team_batting(boxscore):
         if not team_id:
             continue
 
-        # Sum batting stats across all batters in this game
         players = side_data.get('players', {})
         for player_key, player_data in players.items():
             batting = player_data.get('stats', {}).get('batting', {})
-            team_batting[team_id]['strikeouts']       += batting.get('strikeOuts', 0)
-            team_batting[team_id]['plate_appearances'] += batting.get('plateAppearances', 0)
+
+            # Only count players who actually batted
+            ab = batting.get('atBats', 0)
+            bb = batting.get('baseOnBalls', 0)
+            if ab == 0 and bb == 0:
+                continue
+
+            strikeouts = batting.get('strikeOuts', 0)
+
+            # PA = atBats + walks (only reliable fields available from statsapi)
+            pa = ab + bb
+
+            team_batting[team_id]['strikeouts']       += strikeouts
+            team_batting[team_id]['plate_appearances'] += pa
 
 
 # =============================================================================
@@ -345,6 +361,11 @@ for i, game in enumerate(games):
         # Rolling stats from prior starts
         rolling = calculate_rolling_stats(prior_history)
 
+        # Rest days = days between current game and pitcher's most recent prior start
+        rest_days = np.nan
+        if len(prior_history) >= 1:
+            rest_days = (game_date - prior_history[-1]['date']).days
+
         # Statcast data up to the day before this game
         day_before    = (game_date - timedelta(days=1)).strftime('%Y-%m-%d')
         pitch_data    = get_statcast_data(pitcher_id, day_before)
@@ -380,6 +401,7 @@ for i, game in enumerate(games):
             'opponent_k_rate':  opponent_k_rate,
             **pitch_metrics,
             **rolling,
+            'rest_days': rest_days,
         }
 
         all_data.append(record)
@@ -387,12 +409,12 @@ for i, game in enumerate(games):
         # Update this pitcher's history for future games
         pitcher_histories[pitcher_id].append({
             'date':           game_date,
-            'strikeouts':     pitcher['strikeouts'],
-            'pitches_thrown': pitcher['pitches_thrown'],
-            'k_pct':          (pitcher['strikeouts'] / pitcher['pitches_thrown'] * 100)
+            'strikeouts':     float(pitcher['strikeouts']),
+            'pitches_thrown': float(pitcher['pitches_thrown']),
+            'k_pct':          float(pitcher['strikeouts'] / pitcher['pitches_thrown'] * 100)
                                if pitcher['pitches_thrown'] > 0 else np.nan,
-            'swstr_pct':      pitch_metrics.get('swstr_pct', np.nan),
-            'whiff_pct':      pitch_metrics.get('whiff_pct', np.nan),
+            'swstr_pct':      float(pitch_metrics.get('swstr_pct', np.nan)),
+            'whiff_pct':      float(pitch_metrics.get('whiff_pct', np.nan)),
         })
 
     # Update team batting stats AFTER building pitcher records for this game
@@ -416,68 +438,31 @@ print(f"\nMissing values:\n{df.isnull().sum()[df.isnull().sum() > 0]}")
 
 
 # =============================================================================
-# OFFSET DATA FOR PREDICTION
+# SHIFT PITCHES_THROWN AND INNINGS_PITCHED BACK ONE START PER PITCHER
 # =============================================================================
-# Each row will contain features from start N predicting strikeouts from start N+1
+# These are the only columns we can't know at prediction time.
+# We shift them forward by one so each row reflects the PREVIOUS start's workload.
+# The first start per pitcher will have NaN and get dropped in the cleaning step.
 
 df = df.sort_values(['pitcher_id', 'game_date']).reset_index(drop=True)
 
-# Columns we don't want to use as features
-exclude_cols = ['strikeouts', 'game_id', 'game_date', 'pitcher_id',
-                'pitcher_name', 'team', 'opponent']
-
-feature_cols = [col for col in df.columns if col not in exclude_cols]
-info_cols    = ['game_id', 'game_date', 'pitcher_id', 'pitcher_name', 'team', 'opponent']
-
-offset_rows = []
-
-for pitcher_id in df['pitcher_id'].unique():
-    pitcher_games = df[df['pitcher_id'] == pitcher_id].reset_index(drop=True)
-
-    # Need at least 2 starts — one for features, one for the target
-    if len(pitcher_games) < 2:
-        continue
-
-    for i in range(1, len(pitcher_games)):
-        prev = pitcher_games.iloc[i - 1]   # features come from this start
-        curr = pitcher_games.iloc[i]        # target (strikeouts) comes from this start
-
-        row = {}
-
-        # Identifying info from the CURRENT game (the one being predicted)
-        for col in info_cols:
-            row[col] = curr[col]
-
-        # All features from the PREVIOUS game (including pitches_thrown and innings_pitched)
-        # We won't know these values for the current game at prediction time
-        for col in feature_cols:
-            row[f'prev_{col}'] = prev[col]
-
-        # Target from the CURRENT game only
-        row['strikeouts'] = curr['strikeouts']
-
-        offset_rows.append(row)
-
-df_offset = pd.DataFrame(offset_rows)
-
-print(f"\n{'=' * 60}")
-print(f"OFFSET COMPLETE")
-print(f"{'=' * 60}")
-print(f"Original rows : {len(df)}")
-print(f"Offset rows   : {len(df_offset)}  (one start dropped per pitcher)")
-print(f"Feature columns: {[c for c in df_offset.columns if c.startswith('prev_')]}")
-
+df['pitches_thrown']  = df.groupby('pitcher_id')['pitches_thrown'].shift(1)
+df['innings_pitched'] = df.groupby('pitcher_id')['innings_pitched'].shift(1)
 
 # =============================================================================
 # DROP INCOMPLETE ROWS
 # =============================================================================
-# Remove any rows missing feature values (e.g. no prior game history)
 
-prev_cols = [col for col in df_offset.columns if col.startswith('prev_')]
+df = df.sort_values(['pitcher_id', 'game_date']).reset_index(drop=True)
 
-before = len(df_offset)
-df_clean = df_offset.dropna(subset=prev_cols).reset_index(drop=True)
-after = len(df_clean)
+drop_check_cols = [col for col in df.columns if col not in [
+    'game_id', 'game_date', 'pitcher_id', 'pitcher_name',
+    'team', 'opponent', 'strikeouts'
+]]
+
+before = len(df)
+df_clean = df.dropna(subset=drop_check_cols).reset_index(drop=True)
+after   = len(df_clean)
 
 print(f"\n{'=' * 60}")
 print(f"CLEANING COMPLETE")
